@@ -1,25 +1,25 @@
 # Laravel Export Import
 
-`agung/laravel-export-import` menyediakan engine background untuk export CSV/XLSX dan fondasi pemrosesan import. Package ini menyimpan status tiap request pada tabel `export_import_operations`, menjalankan pekerjaan melalui Laravel Queue, dan menyediakan progress yang bisa dibaca adapter aplikasi.
+`agung/laravel-export-import` provides a background engine for CSV/XLSX exports and the foundation for import processing. The package stores the status of each request in the `export_import_operations` table, runs work through Laravel Queue, and exposes progress for application adapters to read.
 
-Package ini tidak memiliki konsep tenant atau aturan domain tertentu. Aplikasi menentukan actor, isi `context`, validasi filter, otorisasi, endpoint status, dan endpoint download.
+The package has no built-in tenant or domain-specific rules. The application defines the actor, `context` contents, filter validation, authorization, status endpoint, and download endpoint.
 
-## Persyaratan
+## Requirements
 
-- PHP 8.3 atau lebih baru
-- Laravel 12 atau 13
-- Queue batch table Laravel (`job_batches`)
-- Queue worker yang aktif
+- PHP 8.3 or later
+- Laravel 12 or 13
+- Laravel queue batch table (`job_batches`)
+- An active queue worker
 
-## Instalasi
+## Installation
 
-Jika package sudah dipublikasikan ke Composer:
+Once the package is available through Composer:
 
 ```bash
 composer require agung/laravel-export-import
 ```
 
-Untuk pengembangan dalam monorepo, daftarkan path repository di `composer.json` aplikasi:
+For development inside a monorepo, register the path repository in the application's `composer.json`:
 
 ```json
 {
@@ -38,29 +38,29 @@ Untuk pengembangan dalam monorepo, daftarkan path repository di `composer.json` 
 }
 ```
 
-Kemudian jalankan:
+Then run:
 
 ```bash
 composer update agung/laravel-export-import
 ```
 
-Laravel menemukan `ExportImportServiceProvider` melalui package discovery. Package memuat migration dan konfigurasi secara otomatis. Untuk menyalin konfigurasi ke aplikasi agar bisa diubah:
+Laravel discovers `ExportImportServiceProvider` automatically. The package loads its migration and configuration. To publish the configuration so it can be changed in the application:
 
 ```bash
 php artisan vendor:publish --tag=export-import-config
 ```
 
-Jalankan migration package dan pastikan migration queue batch Laravel sudah tersedia:
+Run the package migration and make sure Laravel's queue batch migration is available:
 
 ```bash
 php artisan migrate
 ```
 
-Jika tabel `job_batches` belum ada, buat migration batch table menggunakan command Laravel yang tersedia di versi aplikasi, lalu jalankan migration lagi.
+If the `job_batches` table does not exist, create its migration using the command available in your Laravel version, then run the migration again.
 
-## Konfigurasi
+## Configuration
 
-Konfigurasi default package berada di `config/export-import.php` setelah dipublikasikan:
+The package's default configuration is available at `config/export-import.php` after publishing:
 
 ```php
 use Agung\LaravelExportImport\ExportImportOperation;
@@ -88,32 +88,32 @@ return [
 ];
 ```
 
-- `tables.operations`: nama tabel status operation.
-- `storage.disk` dan `storage.directory`: tujuan file export dan upload. File tidak dibuat public oleh package.
-- `queue.connection` dan `queue.name`: jika `null`, Laravel memakai koneksi dan queue default.
-- `download.route`: nama route aplikasi untuk signed download URL. Nilai default `null` berarti package tidak membuat download URL.
-- `download.parameter` dan `download.expiration_minutes`: nama parameter route dan masa berlaku signed URL.
+- `tables.operations`: the operation status table name.
+- `storage.disk` and `storage.directory`: the destination for export and upload files. The package does not make files public.
+- `queue.connection` and `queue.name`: when `null`, Laravel's default connection and queue are used.
+- `download.route`: the application route name for a signed download URL. The default value, `null`, means the package does not generate a download URL.
+- `download.parameter` and `download.expiration_minutes`: the route parameter name and signed URL lifetime.
 
-Setelah mengubah konfigurasi yang di-cache, jalankan `php artisan config:clear`.
+After changing cached configuration, run `php artisan config:clear`.
 
-## Alur export
+## Export flow
 
-1. Adapter aplikasi memvalidasi request, memeriksa akses actor/tenant, lalu memanggil `ExportImportEngine::startExport()`.
-2. Engine membuat `ExportImportOperation` berstatus `queued`, menyimpan class handler, payload filter, context aplikasi, actor, dan format, lalu mengantrekan `ProcessExportImportOperation`.
-3. Worker memanggil handler untuk mendapatkan query, menghitung total row, dan membuat satu Laravel batch job untuk setiap chunk.
-4. Setiap `ProcessExportImportChunk` membaca row menggunakan query terbatas dan menulis file sementara JSONL untuk chunk tersebut.
-5. Laravel mencatat jumlah job batch yang selesai. Setelah semua chunk berhasil, `FinalizeExportImportOperation` menggabungkan file sementara menjadi CSV/XLSX dan mengubah status menjadi `completed`.
-6. Adapter membaca status secara polling. Setelah selesai, adapter menyediakan download URL yang sudah diotorisasi.
+1. The application adapter validates the request, checks actor/tenant access, and calls `ExportImportEngine::startExport()`.
+2. The engine creates an `ExportImportOperation` with `queued` status, stores the handler class, filter payload, application context, actor, and format, then dispatches `ProcessExportImportOperation` to the queue.
+3. A worker calls the handler to get the query, counts the total rows, and creates one Laravel batch job for each chunk.
+4. Each `ProcessExportImportChunk` reads rows using a bounded query and writes a temporary JSONL file for that chunk.
+5. Laravel tracks completed batch jobs. Once every chunk succeeds, `FinalizeExportImportOperation` merges the temporary files into CSV/XLSX and changes the operation status to `completed`.
+6. The adapter polls for status updates. When the export is complete, the adapter provides an authorized download URL.
 
-Chunk sementara disimpan di filesystem, bukan di tabel database. Tabel `export_import_operations` menyimpan status satu operation, sedangkan tabel Laravel `job_batches` menyimpan progress job batch saat export berjalan. Setelah file berhasil difinalisasi, package menghapus record batch dan mengosongkan `batch_id` pada operation; persentase operation selesai tetap 100%.
+Temporary chunks are stored on the filesystem, not in a database table. The `export_import_operations` table stores each operation's status, while Laravel's `job_batches` table tracks batch job progress during an export. After the file is finalized successfully, the package deletes the batch record and clears `batch_id` on the operation; the operation's progress remains at 100%.
 
-Ukuran chunk bawaan menargetkan sekitar 10% dari jumlah row, dibatasi minimal 10 dan maksimal 100 row per job. Untuk total di bawah 10 row, seluruh row diproses dalam satu job. Contoh: 80 row menjadi 8 job berisi 10 row; 1 juta row menjadi 10.000 job berisi 100 row. Progress export dihitung dari jumlah job batch yang selesai.
+The default chunk size targets about 10% of the total row count, with a minimum of 10 and a maximum of 100 rows per job. If the total is fewer than 10 rows, all rows are processed in one job. For example, 80 rows produce 8 jobs of 10 rows each; 1 million rows produce 10,000 jobs of 100 rows each. Export progress is calculated from the number of completed batch jobs.
 
-Job dapat berjalan paralel. Export yang sama tidak dapat overlap untuk actor dan `scopeKey` yang sama. Actor berbeda dapat menjalankan export bersamaan. Aplikasi sebaiknya memberikan `scopeKey` stabil, misalnya ID tenant atau gabungan domain dan tenant.
+Jobs can run in parallel. Exports with the same actor and `scopeKey` cannot overlap. Different actors can export concurrently. The application should provide a stable `scopeKey`, such as a tenant ID or a combination of domain and tenant.
 
-## Membuat handler export
+## Create an export handler
 
-Implementasikan `ExportHandler` pada aplikasi. Handler bertanggung jawab atas query, key yang dipakai untuk membagi query, header, dan mapping satu record menjadi satu row:
+Implement `ExportHandler` in the application. The handler is responsible for the query, the key used to divide the query, the headers, and mapping one record to one row:
 
 ```php
 <?php
@@ -168,11 +168,11 @@ final class OrderExportHandler implements ExportHandler
 }
 ```
 
-Pastikan query memiliki urutan/key yang stabil dan `idColumn()` menunjuk ke kolom unik yang dipakai untuk membagi rentang antar job. Handler sebaiknya eager-load relasi yang dipakai `mapRecord()` untuk menghindari query per row.
+Make sure the query has a stable ordering/key, and that `idColumn()` points to the unique column used to divide ranges between jobs. The handler should eager-load relationships used by `mapRecord()` to avoid a query per row.
 
-## Memulai export dari aplikasi
+## Start an export from the application
 
-Controller atau service aplikasi memvalidasi input dan menjalankan otorisasi sebelum memanggil engine:
+The application controller or service validates input and authorizes the request before calling the engine:
 
 ```php
 use Agung\LaravelExportImport\Enums\ExportFormat;
@@ -195,15 +195,15 @@ $operation = app(ExportImportEngine::class)->startExport(
 );
 ```
 
-`actor` harus berupa Eloquent model atau `null`. Engine menggunakan actor untuk membatasi pencarian operation dengan `findOwnedOperation()`. `context` adalah data aplikasi yang disimpan bersama operation; shop/tenant scope tetap harus diterapkan oleh handler dan adapter aplikasi.
+`actor` must be an Eloquent model or `null`. The engine uses the actor to scope operation lookups through `findOwnedOperation()`. `context` contains application data stored with the operation; the handler and application adapter must still apply the shop/tenant scope.
 
-`startExport()` mengembalikan operation yang baru dibuat. Adapter HTTP biasanya merespons `202 Accepted` dengan `$engine->statusPayload($operation)`.
+`startExport()` returns the newly created operation. An HTTP adapter typically responds with `202 Accepted` and `$engine->statusPayload($operation)`.
 
-## Status, polling, dan download
+## Status, polling, and downloads
 
-Status payload berisi `id`, `type`, `status`, `processed_rows`, `total_rows`, `processed_jobs`, `total_jobs`, `progress_percentage`, `error_message`, `file_name`, dan `download_url`. Status terminal adalah `completed` atau `failed`; hentikan polling pada salah satunya.
+The status payload contains `id`, `type`, `status`, `processed_rows`, `total_rows`, `processed_jobs`, `total_jobs`, `progress_percentage`, `error_message`, `file_name`, and `download_url`. Terminal statuses are `completed` and `failed`; stop polling when either status is reached.
 
-Contoh route status dan download aplikasi:
+Example application status and download routes:
 
 ```php
 Route::get('/export-import/{operation}', [ExportController::class, 'status'])
@@ -215,7 +215,7 @@ Route::get('/export-import/{operation}/download', ExportDownloadController::clas
     ->name('export-import.download');
 ```
 
-Aktifkan signed download URL dengan konfigurasi berikut:
+Enable signed download URLs with this configuration:
 
 ```php
 'download' => [
@@ -225,21 +225,21 @@ Aktifkan signed download URL dengan konfigurasi berikut:
 ],
 ```
 
-Package menyediakan `findOwnedOperation()`, `statusPayload()`, dan `exportDownloadUrl()`, tetapi tidak menyediakan route download umum. Controller download aplikasi harus memeriksa kepemilikan actor dan tenant/account, memastikan operation selesai, lalu mengirim file dari disk privat. Jangan mengandalkan signed URL sebagai pengganti otorisasi aplikasi.
+The package provides `findOwnedOperation()`, `statusPayload()`, and `exportDownloadUrl()`, but does not provide a generic download route. The application's download controller must check actor and tenant/account ownership, confirm the operation is complete, and then stream the file from the private disk. Do not use a signed URL as a replacement for application authorization.
 
-## Integrasi Inertia
+## Inertia integration
 
-Pola adapter Inertia:
+An Inertia adapter typically follows this pattern:
 
-1. Endpoint POST memvalidasi format dan filter.
-2. Endpoint mengambil actor dan tenant/account aktif dari middleware aplikasi.
-3. Endpoint memanggil `startExport()` dengan handler dan filter yang sesuai.
-4. Frontend menyimpan `id`, lalu polling endpoint status menggunakan `useHttp`/Inertia.
-5. Saat status `completed`, frontend menggunakan `download_url`; saat `failed`, tampilkan `error_message`.
+1. The POST endpoint validates the format and filters.
+2. The endpoint gets the active actor and tenant/account from application middleware.
+3. The endpoint calls `startExport()` with the appropriate handler and filters.
+4. The frontend stores the operation `id` and polls the status endpoint using `useHttp`/Inertia.
+5. When status is `completed`, the frontend uses `download_url`; when it is `failed`, it displays `error_message`.
 
-UI Inertia, tombol export, filter, format form, dan polling tidak disediakan oleh package. Implementasikan di aplikasi sesuai desainnya.
+The package does not provide an Inertia UI, export button, filters, format form, or polling implementation. Build these in the application to match its design.
 
-Contoh memulai export order dari controller Inertia:
+Example of starting an order export from an Inertia controller:
 
 ```php
 $operation = $engine->startExport(
@@ -253,13 +253,13 @@ $operation = $engine->startExport(
 );
 ```
 
-Controller mengembalikan `statusPayload($operation)` dengan HTTP 202. Frontend memakai ID operation untuk polling. Adapter harus membatasi request export, status, dan download pada actor yang login serta shop/tenant aktif. `findOwnedOperation()` memeriksa actor; adapter juga harus memeriksa scope di `context` sebelum mengembalikan status atau file.
+The controller returns `statusPayload($operation)` with HTTP 202. The frontend uses the operation ID to poll for updates. The adapter must scope export, status, and download requests to the authenticated actor and active shop/tenant. `findOwnedOperation()` checks the actor; the adapter must also check the scope in `context` before returning a status or file.
 
-## Integrasi GraphQL
+## GraphQL integration
 
-Mutation GraphQL mengikuti pola yang sama dengan adapter HTTP: validasi/otorisasi actor dan tenant, lalu panggil `startExport()` dan kembalikan `statusPayload()`.
+A GraphQL mutation follows the same pattern as an HTTP adapter: validate and authorize the actor and tenant, then call `startExport()` and return `statusPayload()`.
 
-Contoh mutation aplikasi untuk memulai export order:
+Example application mutation for starting an order export:
 
 ```graphql
 mutation StartOrderExport($format: ExportFormat!, $status: String) {
@@ -271,7 +271,7 @@ mutation StartOrderExport($format: ExportFormat!, $status: String) {
 }
 ```
 
-Polling operation:
+Poll the operation:
 
 ```graphql
 query ExportImportStatus($id: ID!) {
@@ -287,11 +287,11 @@ query ExportImportStatus($id: ID!) {
 }
 ```
 
-`exportOrders` dan query `exportImportOperation` pada contoh adalah schema aplikasi, bukan resolver bawaan package. Pastikan resolver status membatasi operation ke actor yang meminta dan menerapkan shop/tenant scope aplikasi.
+`exportOrders` and `exportImportOperation` in these examples are application schema fields, not resolvers provided by the package. Make sure the status resolver scopes the operation to the requesting actor and applies the application's shop/tenant scope.
 
 ## Import handler
 
-`ImportHandler` memperluas `ExportImportHandler`. Engine menyimpan upload ke disk yang dikonfigurasi dan dispatch operation. Handler menerima operation serta `ExportImportProgress`:
+`ImportHandler` extends `ExportImportHandler`. The engine stores the upload on the configured disk and dispatches the operation. The handler receives the operation and `ExportImportProgress`:
 
 ```php
 use Agung\LaravelExportImport\Contracts\ImportHandler;
@@ -313,34 +313,11 @@ final class CustomerImportHandler implements ImportHandler
 }
 ```
 
-Contoh tersebut mengasumsikan aplikasi menyediakan `$reader` dan `importCustomer()`; package belum menyediakan parser atau proses simpan domain. `ExportImportProgress::setTotal()` menetapkan total row dan `advance($rows)` menambah jumlah row yang selesai. Handler import saat ini dipanggil sebagai satu queue job, jadi untuk file besar jangan memuat seluruh file ke memory seperti contoh sederhana ini. Aplikasi perlu membaca file secara streaming atau menambahkan strategi chunking import.
+This example assumes the application provides `$reader` and `importCustomer()`; the package does not provide a parser or domain persistence workflow. `ExportImportProgress::setTotal()` sets the total row count, and `advance($rows)` increments the number of completed rows. Import handlers currently run as a single queue job, so avoid loading a large file into memory as in this simple example. The application should stream the file or implement an import chunking strategy.
 
-## Customization dan batas package
+## Application-specific operation model
 
-- **Filter dan cakupan data:** ubah query di handler. Untuk tenant/account, taruh ID atau metadata di `context` dan terapkan scope secara eksplisit pada query.
-- **Kolom dan format record:** ubah `headers()` dan `mapRecord()` pada `ExportHandler`.
-- **Storage dan queue:** override `storage.disk`, `storage.directory`, `queue.connection`, dan `queue.name` di konfigurasi aplikasi.
-- **Lifecycle HTTP/GraphQL:** implementasikan adapter, validasi, otorisasi, polling, dan download route di aplikasi. Package tidak bergantung pada Inertia, GraphQL, tenant, atau model user tertentu.
-- **Eksklusivitas export:** kirim actor dan `scopeKey` yang sama untuk mencegah export bersamaan pada actor/scope tersebut. Gunakan scope key berbeda jika operasi memang boleh berjalan bersamaan.
-- **Format output:** writer bawaan mendukung CSV dan XLSX.
-- **Chunk sizing:** saat ini rule 10%, minimum 10 row, maksimum 100 row ditetapkan oleh `ExportChunkSizer`; belum ada key config untuk menggantinya.
-- **Writer/finalizer:** strategi penulisan dan penggabungan file dikelola package. Untuk format atau proses yang berbeda, perubahan strategi perlu menjadi extension point package atau implementasi khusus di aplikasi.
-
-### Batas customization
-
-Package sengaja tidak mengikat engine ke model `User`, `Tenant`, Inertia, atau GraphQL. Kustomisasi aplikasi dilakukan dengan:
-
-1. Membuat class handler aplikasi yang mengimplementasikan `ExportHandler` atau `ImportHandler`.
-2. Memasukkan filter yang tervalidasi ke `payload` dan scope otorisasi server ke `context` atau kolom khusus aplikasi.
-3. Mengatur `scopeKey` stabil untuk cakupan yang tidak boleh memiliki export bersamaan.
-4. Membuat adapter untuk start, polling, otorisasi, dan download. Adapter tenant wajib memeriksa tenant pada setiap pembacaan status/file; signed URL hanya membuktikan URL belum diubah dan belum kedaluwarsa.
-5. Mempublikasikan config lalu mengganti disk, direktori, nama tabel, atau queue sesuai aplikasi.
-
-Handler dibuat melalui Laravel container (`app($operation->handler)`), sehingga constructor injection untuk service aplikasi dapat dipakai. Model operation default adalah `Agung\LaravelExportImport\ExportImportOperation`. Aplikasi dapat menggantinya dengan model turunan melalui `export-import.models.operation`; engine dan jobs package menggunakan model terkonfigurasi. Untuk mengganti nama tabel saja, gunakan `export-import.tables.operations`.
-
-### Menambahkan kolom khusus aplikasi
-
-Migration package sengaja tidak memiliki kolom tenant. Jika aplikasi membutuhkan `tenant_id` atau metadata khusus lain di tabel `export_import_operations`, tambahkan kolomnya melalui migration aplikasi dan buat model turunan untuk relasi atau cast khusus.
+The package migration intentionally does not include a tenant column. If the application needs `tenant_id` or other application-specific metadata in `export_import_operations`, add those columns in an application migration and create a model subclass for custom relationships or casts.
 
 ```php
 use Agung\LaravelExportImport\ExportImportOperation as BaseExportImportOperation;
@@ -362,7 +339,7 @@ final class ExportImportOperation extends BaseExportImportOperation
 }
 ```
 
-Daftarkan model aplikasi pada `config/export-import.php`:
+Register the application model in `config/export-import.php`:
 
 ```php
 'models' => [
@@ -370,7 +347,7 @@ Daftarkan model aplikasi pada `config/export-import.php`:
 ],
 ```
 
-Setelah memanggil engine, hubungkan tenant pada operation dalam transaksi yang sama:
+After calling the engine, associate the tenant with the operation in the same transaction:
 
 ```php
 use Agung\LaravelExportImport\Enums\ExportFormat;
@@ -403,19 +380,17 @@ $operation = DB::transaction(function () use ($engine, $actor, $tenant): ExportI
 });
 ```
 
-Engine dispatch melakukan `afterCommit`, sehingga worker baru menerima job setelah transaksi menyimpan operation beserta kolom aplikasi. Pastikan query handler, status, dan download memakai kolom tersebut untuk menerapkan scope. Dengan pola ini migration package tetap dapat dipakai lintas aplikasi, sementara tenant hanya ada pada schema dan implementasi aplikasi yang memerlukannya.
+The engine dispatches jobs with `afterCommit`, so the worker receives the job only after the operation and its application-specific columns have been committed. Ensure the handler query, status endpoint, and download controller use these columns to enforce scope. This keeps the package migration reusable across applications while tenants remain in the schema and implementation of applications that need them.
 
-Class internal yang ditandai `final` memang tidak dapat di-extend. Model operation adalah extension point konfigurasi yang didukung; chunk sizing, writer, dan finalizer belum memiliki konfigurasi untuk diganti oleh aplikasi.
+## Queue worker
 
-## Worker
-
-Jalankan worker Laravel pada koneksi/queue yang dikonfigurasi. Jika menggunakan default connection dan queue:
+Run a Laravel worker for the configured connection/queue. For the default connection and queue:
 
 ```bash
 php artisan queue:work
 ```
 
-Jika package dikonfigurasi ke koneksi atau queue tertentu, jalankan worker dengan nilai yang sama, misalnya:
+If the package uses a specific connection or queue, start a worker with matching values, for example:
 
 ```bash
 php artisan queue:work database --queue=exports
