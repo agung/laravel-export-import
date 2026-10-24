@@ -1,0 +1,24 @@
+{
+    "name": "agung/laravel-export-import",
+    "description": "Background export and import engine for Laravel applications.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3",
+        "laravel/framework": "^12.0 || ^13.0",
+        "openspout/openspout": "^4.0 || ^5.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Agung\\LaravelExportImport\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Agung\\LaravelExportImport\\ExportImportServiceProvider"
+            ]
+        }
+    },
+    "version": "1.0.0"
+}
