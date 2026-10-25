@@ -6,7 +6,7 @@ use Agung\LaravelExportImport\Contracts\ExportHandler;
 use Agung\LaravelExportImport\Enums\ExportImportStatus;
 use Agung\LaravelExportImport\ExportImportOperation;
 use Agung\LaravelExportImport\Services\ExportChunkSizer;
-use Agung\LaravelExportImport\Services\TabularExportWriter;
+use Agung\LaravelExportImport\Services\ExportFileWriterManager;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Bus;
@@ -22,9 +22,11 @@ class FinalizeExportImportOperation implements ShouldQueue
 
     public int $timeout = 3600;
 
-    public function __construct(public int $operationId) {}
+    public function __construct(public int $operationId)
+    {
+    }
 
-    public function handle(TabularExportWriter $writer, ExportChunkSizer $chunkSizer): void
+    public function handle(ExportFileWriterManager $writerManager, ExportChunkSizer $chunkSizer): void
     {
         $operation = ExportImportOperation::newConfiguredQuery()->findOrFail($this->operationId);
         $exporter = app($operation->handler);
@@ -38,11 +40,13 @@ class FinalizeExportImportOperation implements ShouldQueue
             ?? $chunkSizer->chunkCountForTotalRows((int) $operation->total_rows);
 
         try {
+            $writer = $writerManager->forFormat($operation->format);
             $filePath = $writer->finalize(
                 $operation,
                 $exporter->headers(),
                 $this->chunkPaths($operation, $chunkCount),
             );
+
             $batch?->delete();
 
             $operation->forceFill([
@@ -53,6 +57,7 @@ class FinalizeExportImportOperation implements ShouldQueue
                 'active_export_key' => null,
                 'batch_id' => null,
             ])->save();
+
             Storage::disk($operation->disk)->deleteDirectory(
                 sprintf(
                     '%s/exports/%s/chunks',
@@ -67,6 +72,7 @@ class FinalizeExportImportOperation implements ShouldQueue
                 'completed_at' => now(),
                 'active_export_key' => null,
             ])->save();
+
             Storage::disk($operation->disk)->deleteDirectory(
                 sprintf(
                     '%s/exports/%s',
@@ -87,6 +93,7 @@ class FinalizeExportImportOperation implements ShouldQueue
             'completed_at' => now(),
             'active_export_key' => null,
         ]);
+
         $operation = ExportImportOperation::newConfiguredQuery()->find($this->operationId);
         if ($operation) {
             Storage::disk($operation->disk)->deleteDirectory(

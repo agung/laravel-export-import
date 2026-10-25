@@ -2,6 +2,7 @@
 
 namespace Agung\LaravelExportImport\Jobs;
 
+use Agung\LaravelExportImport\Contracts\ChunkedImportHandler;
 use Agung\LaravelExportImport\Contracts\ExportHandler;
 use Agung\LaravelExportImport\Contracts\ExportImportHandler;
 use Agung\LaravelExportImport\Enums\ExportImportStatus;
@@ -9,10 +10,10 @@ use Agung\LaravelExportImport\ExportImportOperation;
 use Agung\LaravelExportImport\Services\ExportChunkSizer;
 use Agung\LaravelExportImport\Services\ExportImportProgress;
 use Illuminate\Bus\Batch;
+use Illuminate\Bus\PendingBatch;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Bus;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use LogicException;
 use Throwable;
@@ -38,8 +39,15 @@ class ProcessExportImportOperation implements ShouldQueue
 
         try {
             $handler = app($operation->handler);
+
             if ($operation->type->value === 'export' && $handler instanceof ExportHandler) {
                 $this->dispatchExportChunks($operation, $handler, $chunkSizer);
+
+                return;
+            }
+
+            if ($operation->type->value === 'import' && $handler instanceof ChunkedImportHandler) {
+                $this->dispatchImportChunks($operation, $handler, $chunkSizer);
 
                 return;
             }
@@ -62,6 +70,12 @@ class ProcessExportImportOperation implements ShouldQueue
                 'active_export_key' => null,
             ])->save();
 
+            $handler = app($operation->handler);
+
+            if ($handler instanceof ChunkedImportHandler) {
+                $handler->cleanupChunks($operation);
+            }
+
             throw $exception;
         }
     }
@@ -75,6 +89,165 @@ class ProcessExportImportOperation implements ShouldQueue
             'active_export_key' => null,
         ]);
         $this->deleteTemporaryFiles();
+
+        $operation = ExportImportOperation::newConfiguredQuery()->find($this->operationId);
+
+        if ($operation) {
+            $handler = app($operation->handler);
+
+            if ($handler instanceof ChunkedImportHandler) {
+                $handler->cleanupChunks($operation);
+            }
+        }
+    }
+
+    private function dispatchImportChunks(
+        ExportImportOperation $operation,
+        ChunkedImportHandler $handler,
+        ExportChunkSizer $chunkSizer,
+    ): void {
+        $chunkCount = $handler->prepareChunks($operation, $chunkSizer);
+
+        if ($chunkCount === 0) {
+            self::dispatchImportFinalizer($operation->getKey());
+
+            return;
+        }
+
+        $this->dispatchImportValidationBatch($operation, $chunkCount);
+    }
+
+    private function dispatchImportValidationBatch(ExportImportOperation $operation, int $chunkCount): void
+    {
+        $jobs = [];
+
+        for ($chunkNumber = 0; $chunkNumber < $chunkCount; $chunkNumber++) {
+            $jobs[] = new ValidateImportChunk($operation->getKey(), $chunkNumber);
+        }
+
+        $operationId = $operation->getKey();
+        $this->setImportPhase($operation, 'validating');
+
+        $batch = Bus::batch($jobs)
+            ->name('Validate import '.$operationId)
+            ->before(static function (Batch $batch) use ($operation): void {
+                $operation->forceFill(['batch_id' => $batch->id])->save();
+            })
+            ->allowFailures(false)
+            ->then(static function (Batch $batch) use ($operationId): void {
+                $operation = ExportImportOperation::newConfiguredQuery()->find($operationId);
+
+                if ($operation) {
+                    self::dispatchImportProcessingBatch($operation, $batch->totalJobs);
+                }
+            })
+            ->catch(static function (Batch $batch, Throwable $exception) use ($operationId): void {
+                self::failImport($operationId, $exception);
+            })
+            ->finally(static function (Batch $batch) use ($operationId): void {
+                self::finishValidationBatch($operationId, $batch);
+            });
+
+        self::applyBatchQueue($batch);
+        $batch->dispatch();
+    }
+
+    private static function dispatchImportProcessingBatch(ExportImportOperation $operation, int $chunkCount): void
+    {
+        $jobs = [];
+
+        for ($chunkNumber = 0; $chunkNumber < $chunkCount; $chunkNumber++) {
+            $jobs[] = new ProcessImportChunk($operation->getKey(), $chunkNumber);
+        }
+
+        self::setImportPhase($operation, 'processing');
+
+        $operationId = $operation->getKey();
+        $batch = Bus::batch($jobs)
+            ->name('Import operation '.$operationId)
+            ->before(static function (Batch $batch) use ($operation): void {
+                $operation->forceFill(['batch_id' => $batch->id])->save();
+            })
+            ->allowFailures(false)
+            ->then(static function (Batch $batch) use ($operationId): void {
+                self::dispatchImportFinalizer($operationId);
+            })
+            ->catch(static function (Batch $batch, Throwable $exception) use ($operationId): void {
+                self::failImport($operationId, $exception);
+            })
+            ->finally(static function (Batch $batch) use ($operationId): void {
+                self::finishProcessingBatch($operationId, $batch);
+            });
+
+        self::applyBatchQueue($batch);
+        $batch->dispatch();
+    }
+
+    private static function setImportPhase(ExportImportOperation $operation, string $phase): void
+    {
+        $context = $operation->context ?? [];
+        $context['import_phase'] = $phase;
+        $operation->forceFill(['context' => $context])->save();
+    }
+
+    private static function failImport(int $operationId, Throwable $exception): void
+    {
+        $operation = ExportImportOperation::newConfiguredQuery()->find($operationId);
+
+        if (! $operation) {
+            return;
+        }
+
+        $operation->forceFill([
+            'status' => ExportImportStatus::Failed,
+            'error_message' => mb_substr($exception->getMessage(), 0, 5000),
+            'completed_at' => now(),
+            'active_export_key' => null,
+        ])->save();
+    }
+
+    private static function finishValidationBatch(int $operationId, Batch $batch): void
+    {
+        $operation = ExportImportOperation::newConfiguredQuery()->find($operationId);
+
+        if ($operation?->status === ExportImportStatus::Failed) {
+            self::cleanupImportChunks($operation);
+        }
+
+        $batch->delete();
+    }
+
+    private static function finishProcessingBatch(int $operationId, Batch $batch): void
+    {
+        $operation = ExportImportOperation::newConfiguredQuery()->find($operationId);
+
+        if ($operation?->status === ExportImportStatus::Failed) {
+            self::cleanupImportChunks($operation);
+            $batch->delete();
+        }
+    }
+
+    private static function cleanupImportChunks(ExportImportOperation $operation): void
+    {
+        $handler = app($operation->handler);
+
+        if ($handler instanceof ChunkedImportHandler) {
+            $handler->cleanupChunks($operation);
+        }
+    }
+
+    private static function applyBatchQueue(PendingBatch $batch): void
+    {
+        $connection = config('export-import.queue.connection');
+        $queue = config('export-import.queue.name');
+
+        if (is_string($connection) && $connection !== '') {
+            $batch->onConnection($connection);
+        }
+
+        if (is_string($queue) && $queue !== '') {
+            $batch->onQueue($queue);
+        }
     }
 
     private function dispatchExportChunks(
@@ -144,6 +317,7 @@ class ProcessExportImportOperation implements ShouldQueue
                         'active_export_key' => null,
                     ]);
                 });
+
                 $directory = trim((string) config('export-import.storage.directory', 'export-import'), '/');
                 Storage::disk((string) config('export-import.storage.disk', 'local'))
                     ->deleteDirectory("{$directory}/exports/{$operationId}");
@@ -166,6 +340,23 @@ class ProcessExportImportOperation implements ShouldQueue
     private static function dispatchFinalizer(int $operationId): void
     {
         $job = new FinalizeExportImportOperation($operationId);
+        $connection = config('export-import.queue.connection');
+        $queue = config('export-import.queue.name');
+
+        if (is_string($connection) && $connection !== '') {
+            $job->onConnection($connection);
+        }
+
+        if (is_string($queue) && $queue !== '') {
+            $job->onQueue($queue);
+        }
+
+        dispatch($job);
+    }
+
+    private static function dispatchImportFinalizer(int $operationId): void
+    {
+        $job = new FinalizeImportOperation($operationId);
         $connection = config('export-import.queue.connection');
         $queue = config('export-import.queue.name');
 

@@ -1,6 +1,7 @@
 <?php
 
 use Agung\LaravelExportImport\ExportImportOperation;
+use Agung\LaravelExportImport\Services\TabularExportWriter;
 
 return [
     'models' => [
@@ -16,6 +17,12 @@ return [
     'queue' => [
         'connection' => null,
         'name' => null,
+    ],
+    'export' => [
+        'writers' => [
+            'csv' => TabularExportWriter::class,
+            'xlsx' => TabularExportWriter::class,
+        ],
     ],
     'download' => [
         'route' => null,

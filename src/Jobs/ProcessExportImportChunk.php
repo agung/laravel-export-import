@@ -62,6 +62,7 @@ class ProcessExportImportChunk implements ShouldQueue
         }
 
         $exporter = app($operation->handler);
+
         if (! $exporter instanceof ExportHandler) {
             throw new LogicException('Export handler must implement ExportHandler.');
         }

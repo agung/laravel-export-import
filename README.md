@@ -64,6 +64,7 @@ The package's default configuration is available at `config/export-import.php` a
 
 ```php
 use Agung\LaravelExportImport\ExportImportOperation;
+use Agung\LaravelExportImport\Services\TabularExportWriter;
 
 return [
     'models' => [
@@ -80,6 +81,12 @@ return [
         'connection' => null,
         'name' => null,
     ],
+    'export' => [
+        'writers' => [
+            'csv' => TabularExportWriter::class,
+            'xlsx' => TabularExportWriter::class,
+        ],
+    ],
     'download' => [
         'route' => null,
         'parameter' => 'operation',
@@ -91,6 +98,7 @@ return [
 - `tables.operations`: the operation status table name.
 - `storage.disk` and `storage.directory`: the destination for export and upload files. The package does not make files public.
 - `queue.connection` and `queue.name`: when `null`, Laravel's default connection and queue are used.
+- `export.writers`: maps each export format to a class implementing `ExportFileWriter`. CSV and XLSX use the built-in tabular writer by default; applications can register additional formats.
 - `download.route`: the application route name for a signed download URL. The default value, `null`, means the package does not generate a download URL.
 - `download.parameter` and `download.expiration_minutes`: the route parameter name and signed URL lifetime.
 
@@ -169,6 +177,58 @@ final class OrderExportHandler implements ExportHandler
 ```
 
 Make sure the query has a stable ordering/key, and that `idColumn()` points to the unique column used to divide ranges between jobs. The handler should eager-load relationships used by `mapRecord()` to avoid a query per row.
+
+## Add a custom export writer
+
+The export pipeline is format-agnostic after chunks have been written. To add an application-specific output format, implement `ExportFileWriter` in the application and register it under the desired format key:
+
+```php
+use Agung\LaravelExportImport\Services\TabularExportWriter;
+use App\Exports\CustomExportFileWriter;
+
+return [
+    'export' => [
+        'writers' => [
+            'csv' => TabularExportWriter::class,
+            'xlsx' => TabularExportWriter::class,
+            'custom' => CustomExportFileWriter::class,
+        ],
+    ],
+];
+```
+
+The writer receives the operation, column headers, and an iterable of temporary JSONL chunk paths. It generates the final file on the operation's configured private disk and returns the relative file path. The application writer can use any output library supported by the application; the package does not add format-specific dependencies.
+
+```php
+<?php
+
+namespace App\Exports;
+
+use Agung\LaravelExportImport\Contracts\ExportFileWriter;
+use Agung\LaravelExportImport\ExportImportOperation;
+
+final class CustomExportFileWriter implements ExportFileWriter
+{
+    public function __construct(private CustomExportRenderer $renderer)
+    {
+    }
+
+    /**
+     * Generates the custom export from completed JSONL chunks and stores it privately.
+     *
+     * @param  list<string>  $headers
+     * @param  iterable<string>  $chunkPaths
+     */
+    public function finalize(ExportImportOperation $operation, array $headers, iterable $chunkPaths): string
+    {
+        return $this->renderer->renderToDisk($operation, $headers, $chunkPaths);
+    }
+}
+```
+
+`CustomExportRenderer` is application code that reads the JSONL rows, generates the chosen output, stores the result on the configured disk, and returns its relative path. Start the export with the matching format key; the normal queue, chunk progress, status polling, and download authorization flow remains the same. Applications can register any format key and corresponding writer this way.
+
+Pass the configured key as the `format` argument to `startExport()`, for example `format: 'custom'`. The package's `ExportFormat` enum contains the built-in CSV and XLSX values; application-specific formats use their configured string key.
 
 ## Start an export from the application
 
@@ -291,7 +351,7 @@ query ExportImportStatus($id: ID!) {
 
 ## Import handler
 
-`ImportHandler` extends `ExportImportHandler`. The engine stores the upload on the configured disk and dispatches the operation. The handler receives the operation and `ExportImportProgress`:
+`ImportHandler` extends `ExportImportHandler`. The engine stores the upload on the configured disk and dispatches the operation. A basic handler receives the operation and `ExportImportProgress`:
 
 ```php
 use Agung\LaravelExportImport\Contracts\ImportHandler;
@@ -313,7 +373,51 @@ final class CustomerImportHandler implements ImportHandler
 }
 ```
 
-This example assumes the application provides `$reader` and `importCustomer()`; the package does not provide a parser or domain persistence workflow. `ExportImportProgress::setTotal()` sets the total row count, and `advance($rows)` increments the number of completed rows. Import handlers currently run as a single queue job, so avoid loading a large file into memory as in this simple example. The application should stream the file or implement an import chunking strategy.
+This example assumes the application provides `$reader` and `importCustomer()`; the package does not provide a parser or domain persistence workflow. `ExportImportProgress::setTotal()` sets the total row count, and `advance($rows)` increments the number of completed rows. A basic `ImportHandler` runs in one queue job and is best suited to short imports.
+
+For large imports, implement `ChunkedImportHandler`. Its `prepareChunks()` method counts rows and writes bounded temporary files to the operation's private disk; it should avoid domain validation and writes. The engine dispatches one `ValidateImportChunk` job per prepared file. Each job validates its chunk without writing imported records. Only after every validation job succeeds does the engine dispatch one `ProcessImportChunk` job per file. `handleChunk()` processes one file and advances progress after records have been committed. `cleanupChunks()` removes temporary files after completion or failure.
+
+Import progress is split evenly between validation and processing. This keeps progress monotonic when the engine replaces the validation batch with the processing batch. Validation failures stop the import before any chunk is written.
+
+```php
+use Agung\LaravelExportImport\Contracts\ChunkedImportHandler;
+use Agung\LaravelExportImport\ExportImportOperation;
+use Agung\LaravelExportImport\Services\ExportChunkSizer;
+use Agung\LaravelExportImport\Services\ExportImportProgress;
+
+final class OrderImportHandler implements ChunkedImportHandler
+{
+    public function prepareChunks(ExportImportOperation $operation, ExportChunkSizer $chunkSizer): int
+    {
+        // Count rows, set total_rows, and stage transaction-safe chunks.
+    }
+
+    public function validateChunk(ExportImportOperation $operation, int $chunkNumber): void
+    {
+        // Validate this staged chunk without writing domain records.
+    }
+
+    public function handleChunk(
+        ExportImportOperation $operation,
+        int $chunkNumber,
+        ExportImportProgress $progress,
+    ): void {
+        // Read and import only the requested staged chunk.
+    }
+
+    public function cleanupChunks(ExportImportOperation $operation): void
+    {
+        // Delete this operation's staged chunk files.
+    }
+
+    public function handle(ExportImportOperation $operation, ExportImportProgress $progress): void
+    {
+        // Keep a sequential fallback for direct handler invocation.
+    }
+}
+```
+
+The default `ExportChunkSizer` targets about 10% of the total row count, with a minimum of 10 and a maximum of 100 rows per job. A handler must keep related rows together when splitting; a transaction group may exceed the target, but it must not be split across jobs. Chunk jobs can run in parallel, so domain writes must be safe for concurrent execution. The engine removes the Laravel batch record after finalization and preserves operation progress.
 
 ## Application-specific operation model
 

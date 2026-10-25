@@ -2,6 +2,7 @@
 
 namespace Agung\LaravelExportImport\Services;
 
+use Agung\LaravelExportImport\Contracts\ExportFileWriter;
 use Agung\LaravelExportImport\Enums\ExportFormat;
 use Agung\LaravelExportImport\ExportImportOperation;
 use Closure;
@@ -16,7 +17,7 @@ use OpenSpout\Writer\XLSX\Writer as XlsxWriter;
 use RuntimeException;
 use Throwable;
 
-final class TabularExportWriter
+final class TabularExportWriter implements ExportFileWriter
 {
     private const int QUERY_BATCH_SIZE = 100;
 

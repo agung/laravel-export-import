@@ -62,7 +62,22 @@ class ExportImportOperation extends Model
         if ($this->batch_id) {
             $batch = Bus::findBatch($this->batch_id);
 
-            return $batch ? min(99.99, (float) $batch->progress()) : null;
+            if (! $batch) {
+                return null;
+            }
+
+            $batchProgress = (float) $batch->progress();
+            $phase = $this->context['import_phase'] ?? null;
+
+            if ($phase === 'validating') {
+                return min(99.99, $batchProgress / 2);
+            }
+
+            if ($phase === 'processing') {
+                return min(99.99, 50 + ($batchProgress / 2));
+            }
+
+            return min(99.99, $batchProgress);
         }
 
         if ($this->total_rows === null || $this->total_rows === 0) {
